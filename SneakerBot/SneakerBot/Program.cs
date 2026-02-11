@@ -3,6 +3,7 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using Telegram.Bot.Types.Payments;
 using Telegram.Bot.Types.ReplyMarkups;
 
 namespace SneakerBot
@@ -58,26 +59,37 @@ namespace SneakerBot
 
         private async Task UpdateHandler(ITelegramBotClient client, Update update, CancellationToken token)
         {
-            if (update.Message == null && update.CallbackQuery == null) return;
+            long chatId = 0;
+            Telegram.Bot.Types.User? telegramUser = null;
 
-            var message = update.Message;
-            var chatId = message?.Chat.Id ?? update.CallbackQuery.Message.Chat.Id;
-            var text = message?.Text;
+            if (update.Message != null)
+            {
+                chatId = update.Message.Chat.Id;
+                telegramUser = update.Message.From;
+            }
+            else if (update.CallbackQuery != null)
+            {
+                chatId = update.CallbackQuery.Message.Chat.Id;
+                telegramUser = update.CallbackQuery.From;
+            }
+            else if (update.PreCheckoutQuery != null) 
+            {
+                chatId = update.PreCheckoutQuery.From.Id;
+                telegramUser = update.PreCheckoutQuery.From;
+            }
+            if (chatId == 0) return;
 
-            var fromUser = update.Message?.From ?? update.CallbackQuery?.From;
-
-            if (fromUser != null)
+            if (telegramUser != null)
             {
                 if (!db.UserExists(chatId))
                 {
                     var newUser = new User
                     {
                         ChatId = chatId,
-                        Username = fromUser.Username ?? "Без ника",
-                        FirstName = fromUser.FirstName ?? "Аноним",
+                        Username = telegramUser.Username ?? "Без ника",
+                        FirstName = telegramUser.FirstName ?? "Аноним",
                         RegistrationDate = DateTime.Now
                     };
-
                     db.AddUser(newUser);
                     Console.WriteLine($"🎉 Новый пользователь: {newUser.FirstName} ({chatId})");
                 }
@@ -89,19 +101,59 @@ namespace SneakerBot
                 _states[chatId] = state;
             }
 
-            if (state.isAddingProduct && message != null)
+            switch (update.Type)
             {
-                await DialogHandler(message, chatId, state);
-                return;
-            }
-            if (message?.Text != null)
-            {
-                await TextMessageHandler(message, chatId, state);
-                return;
-            }
-            if(update.CallbackQuery != null)
-            {
-                await CallBackQueryHandler(update.CallbackQuery, chatId, state);
+                case UpdateType.Message:
+                    if (update.Message.SuccessfulPayment != null)
+                    {
+                        string payload = update.Message.SuccessfulPayment.InvoicePayload;
+                        if (payload.StartsWith("purchase_"))
+                        {
+                            string[] parts = payload.Split('_');
+                            if (parts.Length == 2 && int.TryParse(parts[1], out int purchasedProductId))
+                            {
+                                await bot.SendMessage(chatId, $"✅ Спасибо за покупку! Вы купили товар с ID: {purchasedProductId}.");
+                                var product = db.GetProductById(purchasedProductId);
+                                if (product != null)
+                                {
+                                    await bot.SendPhoto(1369750317, photo: InputFile.FromFileId(product.PhotoId), caption: $"Пользователь @{update.Message.From?.Username ?? "N/A"} оплатил продукт {product.Name}: {product.Id}");
+                                }
+                            }
+                            else
+                            {
+                                await bot.SendMessage(chatId, "Произошла ошибка при обработке ID товара.");
+                            }
+                        }
+                        else
+                        {
+                            await bot.SendMessage(chatId, "Неизвестный тип оплаты.");
+                        }
+                        return; 
+                    }
+
+                    if (state.isAddingProduct)
+                    {
+                        await DialogHandler(update.Message, chatId, state);
+                    }
+                    else 
+                    {
+                        if (update.Message.Text != null) 
+                        {
+                            await TextMessageHandler(update.Message, chatId, state);
+                        }
+                    }
+                    break;
+
+                case UpdateType.CallbackQuery:
+                    await CallBackQueryHandler(update.CallbackQuery, chatId, state);
+                    break;
+
+                case UpdateType.PreCheckoutQuery:
+                    await bot.AnswerPreCheckoutQuery(update.PreCheckoutQuery.Id);
+                    break;
+                default:
+                    Console.WriteLine($"Неизвестный тип обновления: {update.Type}");
+                    break;
             }
         }
 
@@ -114,9 +166,22 @@ namespace SneakerBot
                 await bot.SendMessage(chatId, "Каталог на данный момент пуст. Загляни позже!");
             }
 
-            foreach(var p in products)
+            foreach (var p in products)
             {
-                await bot.SendPhoto(chatId, InputFile.FromFileId(p.PhotoId), caption: $"👟*{p.Name}*\nЦена: *{p.Price}*", parseMode: ParseMode.Markdown);
+                string caption = $"👟 *{p.Name}*\n\n💰 Цена: *{p.Price} руб.*";
+
+                var buyButton = InlineKeyboardButton.WithCallbackData("Купить за Stars ✨", $"buy:{p.Id}");
+                var keyboard = new InlineKeyboardMarkup(buyButton);
+
+                await bot.SendPhoto(
+                    chatId,
+                    photo: InputFile.FromFileId(p.PhotoId),
+                    caption: caption,
+                    parseMode: ParseMode.Markdown,
+                    replyMarkup: keyboard 
+                );
+
+                await Task.Delay(200);
             }
         }
 
@@ -163,6 +228,32 @@ namespace SneakerBot
                                    $"Новых за сегодня: *{todayNewUsers}*";
                 await bot.SendMessage(chatId, userStats, parseMode: ParseMode.Markdown);
             }
+
+            else if(text.StartsWith("buy:"))
+            {
+                if (!int.TryParse(text.Substring(4), out int productId)) return;
+
+                var productToBuy = db.GetProductById(productId);
+
+                if (productToBuy != null)
+                {
+                    await bot.SendInvoice(
+                        chatId: chatId,
+                        title: $"Покупка: {productToBuy.Name}",
+                        description: $"Кроссовки {productToBuy.Name} по цене {productToBuy.Price} Stars",
+                        payload: $"purchase_{productId}", 
+                        providerToken: "XTR", 
+                        currency: "XTR", 
+                        prices: new[] { new LabeledPrice(productToBuy.Name, productToBuy.Price) }, 
+                        maxTipAmount: 0, 
+                        needShippingAddress: false
+                    );
+                }
+                else
+                {
+                    await bot.SendMessage(chatId, "Извините, товар не найден.");
+                }
+            }
         }
 
         async Task TextMessageHandler(Message message, long chatId, UserState state)
@@ -175,7 +266,7 @@ namespace SneakerBot
             }
             else if(text == "123")
             {
-                await bot.SendMessage(chatId, "!");
+                await bot.SendMessage(chatId, "Права админа получены\n/admin");
                 state.isAdmin = true;
             }
             else if (text == "/admin" && state.isAdmin)
@@ -338,6 +429,10 @@ namespace SneakerBot
         public List<Product> GetProducts()
         {
             return _connection.Table<Product>().ToList();
+        }
+        public Product GetProductById(int id)
+        {
+            return _connection.Table<Product>().FirstOrDefault(p => p.Id == id);
         }
         public List<User> GetAllUsers()
         {
