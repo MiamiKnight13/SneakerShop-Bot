@@ -37,8 +37,8 @@
 ---
 ## 📸 Скриншоты
 
-![photo_2026-02-14_11-13-33](https://github.com/user-attachments/assets/b6a9078d-4e2a-4bde-8d29-aba21687f378)
-
 ![photo_2026-02-14_11-13-41](https://github.com/user-attachments/assets/d48117e3-7fe6-4033-a1e6-f4089ae41797)
+
+![photo_2026-02-14_11-13-33](https://github.com/user-attachments/assets/b6a9078d-4e2a-4bde-8d29-aba21687f378)
 
 ![photo_2026-02-14_11-13-45](https://github.com/user-attachments/assets/ae2a6c42-dc1e-4689-82f0-f98fa8b2859f)
